@@ -14,6 +14,10 @@ Empty notes are not saved.
 
 Each note is a plain Markdown file in `~/Documents/PopNote/`, named by date and first line, for example `2026-11-14 0825 – grocery list.md`. Any editor can open these files, and Spotlight can search them.
 
+### Images
+
+Drag an image into a note, or paste one with ⌘V. It shows inline while you write. When the note is saved, each image is written to `~/Documents/PopNote/attachments/` and the note gets a normal Markdown link (`![](attachments/20261114-083254-1.png)`), so editors like Obsidian or Typora show it. **Copy** puts both the pictures and the text on the clipboard, so pasting into Notes, Mail or Pages keeps the images. Pasting text never brings in fonts or colours.
+
 PopNote lives in the menu bar (no Dock icon). From there you can open a new note, open the notes folder, turn on **Launch at Login**, or quit.
 
 ## Install
