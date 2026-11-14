@@ -109,6 +109,30 @@ final class NoteTextView: NSTextView {
         typingAttributes = [.font: baseFont, .foregroundColor: NSColor.textColor]
     }
 
+    /// Set by the app: copies a selection that contains images (paths in the text).
+    var onCopyWithImages: ((NSAttributedString) -> Void)?
+
+    private var selectionWithImages: NSAttributedString? {
+        let range = selectedRange()
+        guard range.length > 0, let storage = textStorage else { return nil }
+        let sel = storage.attributedSubstring(from: range)
+        var found = false
+        sel.enumerateAttribute(.attachment, in: NSRange(location: 0, length: sel.length)) { v, _, stop in
+            if v != nil { found = true; stop.pointee = true }
+        }
+        return found ? sel : nil
+    }
+
+    override func copy(_ sender: Any?) {
+        if let sel = selectionWithImages, let onCopyWithImages { onCopyWithImages(sel) } else { super.copy(sender) }
+    }
+
+    override func cut(_ sender: Any?) {
+        guard selectionWithImages != nil, onCopyWithImages != nil else { super.cut(sender); return }
+        copy(sender)
+        insertText("", replacementRange: selectedRange())
+    }
+
     override func paste(_ sender: Any?) {
         if insertImages(from: .general) { return }
         pasteAsPlainText(sender)
@@ -499,6 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.delegate = self
+        textView.onCopyWithImages = { [weak self] sel in self?.copyToClipboard(sel) }
         scroll.documentView = textView
         content.addSubview(scroll)
 
@@ -678,33 +703,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
 
     var noteHasImages: Bool { hasImages(textView.attributedString()) }
 
-    /// The note's text with the image placeholders removed.
-    var plainText: String {
-        textView.string.replacingOccurrences(of: "\u{FFFC}", with: "")
-    }
-
     var noteIsEmpty: Bool { isEmpty(textView.attributedString()) }
 
     @objc func copyAndHide() {
-        if !noteIsEmpty {
-            let pb = NSPasteboard.general
-            pb.clearContents()
-            if noteHasImages {
-                // Rich copy so Notes, Mail, Pages etc. get the pictures too.
-                // Swap each thumbnail for the full-resolution original.
-                let s = NSMutableAttributedString(attributedString: textView.attributedString())
-                s.enumerateAttribute(.attachment, in: NSRange(location: 0, length: s.length)) { value, range, _ in
-                    guard let a = value as? NSTextAttachment, let (data, ext) = a.imageFile else { return }
-                    let wrapper = FileWrapper(regularFileWithContents: data)
-                    wrapper.preferredFilename = "image.\(ext)"
-                    s.addAttribute(.attachment, value: NSTextAttachment(fileWrapper: wrapper), range: range)
-                }
-                if let rtfd = s.rtfd(from: NSRange(location: 0, length: s.length), documentAttributes: [:]) {
-                    pb.setData(rtfd, forType: .rtfd)
-                }
-            }
-            pb.setString(plainText, forType: .string)
-        }
+        if !noteIsEmpty { copyToClipboard(textView.attributedString()) }
         saveAndHide()
     }
 
@@ -722,39 +724,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         catch { NSSound.beep() }
     }
 
-    /// Turns a note into Markdown. Each image is written to ~/Documents/PopNote/attachments/
-    /// (unless it's already there) and replaced by a ![](attachments/…) link.
-    func markdownSavingImages(_ s: NSAttributedString) throws -> String {
-        let attachmentsDir = notesDir.appendingPathComponent("attachments", isDirectory: true)
+    var attachmentsDir: URL { notesDir.appendingPathComponent("attachments", isDirectory: true) }
+
+    /// Makes sure an image is saved in ~/Documents/PopNote/attachments/ and returns its
+    /// file name (images already saved there are not copied again).
+    func savedImageName(_ attachment: NSTextAttachment) throws -> String? {
+        let fm = FileManager.default
+        if let a = attachment as? ImageAttachment, let name = a.savedName,
+           fm.fileExists(atPath: attachmentsDir.appendingPathComponent(name).path) {
+            return name
+        }
+        guard let (data, ext) = attachment.imageFile else { return nil }
+        try fm.createDirectory(at: attachmentsDir, withIntermediateDirectories: true)
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyyMMdd-HHmmss"
         let stamp = fmt.string(from: Date())
-        var out = ""
         var n = 1
+        var name: String
+        repeat { name = "\(stamp)-\(n).\(ext)"; n += 1 }
+        while fm.fileExists(atPath: attachmentsDir.appendingPathComponent(name).path)
+        try data.write(to: attachmentsDir.appendingPathComponent(name))
+        (attachment as? ImageAttachment)?.savedName = name
+        return name
+    }
+
+    /// Turns a note into Markdown: each image becomes a ![](attachments/…) link.
+    func markdownSavingImages(_ s: NSAttributedString) throws -> String {
+        var out = ""
         var failure: Error?
         s.enumerateAttribute(.attachment, in: NSRange(location: 0, length: s.length)) { value, range, stop in
             guard let attachment = value as? NSTextAttachment else {
                 out += (s.string as NSString).substring(with: range)
                 return
             }
-            if let a = attachment as? ImageAttachment, let name = a.savedName,
-               FileManager.default.fileExists(atPath: attachmentsDir.appendingPathComponent(name).path) {
-                out += "![](attachments/\(name))"
-                return
-            }
-            guard let (data, ext) = attachment.imageFile else { return }
             do {
-                try FileManager.default.createDirectory(at: attachmentsDir, withIntermediateDirectories: true)
-                var name: String
-                repeat { name = "\(stamp)-\(n).\(ext)"; n += 1 }
-                while FileManager.default.fileExists(atPath: attachmentsDir.appendingPathComponent(name).path)
-                try data.write(to: attachmentsDir.appendingPathComponent(name))
-                (attachment as? ImageAttachment)?.savedName = name
-                out += "![](attachments/\(name))"
+                if let name = try savedImageName(attachment) { out += "![](attachments/\(name))" }
             } catch { failure = error; stop.pointee = true }
         }
         if let failure { throw failure }
         return out.replacingOccurrences(of: "\u{FFFC}", with: "")
+    }
+
+    /// Plain text for the clipboard: each image becomes the full path of its file, so
+    /// pasting into a terminal or an AI chat gives something usable.
+    func clipboardText(_ s: NSAttributedString) -> String {
+        var out = ""
+        s.enumerateAttribute(.attachment, in: NSRange(location: 0, length: s.length)) { value, range, _ in
+            if let attachment = value as? NSTextAttachment {
+                if let name = try? savedImageName(attachment) { out += attachmentsDir.appendingPathComponent(name).path }
+            } else {
+                out += (s.string as NSString).substring(with: range)
+            }
+        }
+        return out.replacingOccurrences(of: "\u{FFFC}", with: "")
+    }
+
+    /// Puts a note (or part of one) on the clipboard: text with image paths for plain-text
+    /// apps, plus the full-resolution pictures for apps that take rich text.
+    func copyToClipboard(_ s: NSAttributedString) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        if hasImages(s) {
+            let rich = NSMutableAttributedString(attributedString: s)
+            rich.enumerateAttribute(.attachment, in: NSRange(location: 0, length: rich.length)) { value, range, _ in
+                guard let a = value as? NSTextAttachment, let (data, ext) = a.imageFile else { return }
+                let wrapper = FileWrapper(regularFileWithContents: data)
+                wrapper.preferredFilename = "image.\(ext)"
+                rich.addAttribute(.attachment, value: NSTextAttachment(fileWrapper: wrapper), range: range)
+            }
+            if let rtfd = rich.rtfd(from: NSRange(location: 0, length: rich.length), documentAttributes: [:]) {
+                pb.setData(rtfd, forType: .rtfd)
+            }
+        }
+        pb.setString(clipboardText(s), forType: .string)
     }
 
     /// "2026-11-14 0817 – grocery list.md" — date, then the note's first line.
