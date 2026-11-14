@@ -16,9 +16,11 @@ Each note is a plain Markdown file in `~/Documents/PopNote/`, named by date and 
 
 ### Images
 
-Drag an image into a note, or paste one with ⌘V. It shows inline while you write. When the note is saved, each image is written to `~/Documents/PopNote/attachments/` and the note gets a normal Markdown link (`![](attachments/20261114-083254-1.png)`), so editors like Obsidian or Typora show it. **Copy** puts both the pictures and the text on the clipboard, so pasting into Notes, Mail or Pages keeps the images. Pasting text never brings in fonts or colours.
+Drag an image into a note, or paste one with ⌘V. It shows inline as a small preview that fits the window (and re-fits when you resize it), so even a huge photo stays manageable. The full-resolution original is what gets saved and copied. When the note is saved, each image is written to `~/Documents/PopNote/attachments/` and the note gets a normal Markdown link (`![](attachments/20261114-083254-1.png)`), so editors like Obsidian or Typora show it. **Copy** puts both the pictures and the text on the clipboard, so pasting into Notes, Mail or Pages keeps the images. Pasting text never brings in fonts or colours.
 
-PopNote lives in the menu bar (no Dock icon). From there you can open a new note, open the notes folder, turn on **Launch at Login**, or quit.
+Double-click the title bar to fit the window to the note's content.
+
+PopNote lives in the menu bar (no Dock icon). From there you can open a new note, open the notes folder, turn on **Launch at Login**, choose **Appearance** (Follow System, Light or Dark), or quit.
 
 ## Install
 

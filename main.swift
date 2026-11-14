@@ -12,9 +12,71 @@ import UniformTypeIdentifiers
 
 /// A text view that shows images inline but keeps all text plain (no fonts or colours
 /// carried in from pasted web pages).
+/// An inline image. The note shows a small thumbnail; the original bytes are kept
+/// untouched for saving and copying.
+final class ImageAttachment: NSTextAttachment {
+    var original = Data()
+    var ext = "png"
+    var pixelSize = NSSize.zero
+
+    /// Largest thumbnail edge in pixels: sharp on Retina at the sizes PopNote shows,
+    /// without holding a 50-megapixel bitmap in memory.
+    static let thumbnailPixels = 1200
+
+    convenience init?(data: Data, ext: String) {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,   // respect photo rotation
+            kCGImageSourceThumbnailMaxPixelSize: Self.thumbnailPixels,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        self.init(data: nil, ofType: nil)
+        original = data
+        self.ext = ext
+        var w = props[kCGImagePropertyPixelWidth] as? CGFloat ?? CGFloat(thumb.width)
+        var h = props[kCGImagePropertyPixelHeight] as? CGFloat ?? CGFloat(thumb.height)
+        if let o = props[kCGImagePropertyOrientation] as? Int, (5...8).contains(o) { swap(&w, &h) }
+        pixelSize = NSSize(width: w, height: h)
+        image = NSImage(cgImage: thumb, size: NSSize(width: thumb.width, height: thumb.height))
+    }
+
+    /// Fit inside the note's width and a maximum height; never enlarge.
+    func fit(width maxW: CGFloat, height maxH: CGFloat) {
+        guard pixelSize.width > 0, pixelSize.height > 0 else { return }
+        let scale = min(1, maxW / pixelSize.width, maxH / pixelSize.height)
+        bounds = CGRect(x: 0, y: 0, width: floor(pixelSize.width * scale), height: floor(pixelSize.height * scale))
+    }
+}
+
 final class NoteTextView: NSTextView {
-    static let maxImageWidth: CGFloat = 320
+    static let maxImageHeight: CGFloat = 240
     let baseFont = NSFont.systemFont(ofSize: 14)
+
+    /// Width an image may take up: the text area minus its side padding.
+    var imageWidthLimit: CGFloat {
+        let w = (textContainer?.size.width ?? bounds.width) - 2 * (textContainer?.lineFragmentPadding ?? 5) - 4
+        return max(40, w)
+    }
+
+    /// Re-fit every image after the window changes size.
+    func rescaleImages() {
+        guard let storage = textStorage, let lm = layoutManager else { return }
+        let full = NSRange(location: 0, length: storage.length)
+        var changed = false
+        storage.enumerateAttribute(.attachment, in: full) { value, _, _ in
+            guard let a = value as? ImageAttachment else { return }
+            let old = a.bounds
+            a.fit(width: imageWidthLimit, height: Self.maxImageHeight)
+            if a.bounds != old { changed = true }
+        }
+        if changed {
+            lm.invalidateLayout(forCharacterRange: full, actualCharacterRange: nil)
+            needsDisplay = true
+        }
+    }
 
     func resetTypingAttributes() {
         typingAttributes = [.font: baseFont, .foregroundColor: NSColor.textColor]
@@ -68,16 +130,8 @@ final class NoteTextView: NSTextView {
     func insert(images: [(data: Data, ext: String)]) {
         let out = NSMutableAttributedString()
         for (data, ext) in images {
-            guard let image = NSImage(data: data) else { continue }
-            let wrapper = FileWrapper(regularFileWithContents: data)
-            wrapper.preferredFilename = "image.\(ext)"
-            let attachment = NSTextAttachment(fileWrapper: wrapper)
-            attachment.image = image
-            var size = image.size
-            if size.width > Self.maxImageWidth {
-                size = NSSize(width: Self.maxImageWidth, height: size.height * Self.maxImageWidth / size.width)
-            }
-            attachment.bounds = CGRect(origin: .zero, size: size)
+            guard let attachment = ImageAttachment(data: data, ext: ext) else { continue }
+            attachment.fit(width: imageWidthLimit, height: Self.maxImageHeight)
             out.append(NSAttributedString(attachment: attachment))
             out.append(NSAttributedString(string: "\n", attributes: [.font: baseFont, .foregroundColor: NSColor.textColor]))
         }
@@ -96,6 +150,7 @@ extension NSImage {
 extension NSTextAttachment {
     /// The image's bytes and file extension, whichever way it got into the note.
     var imageFile: (data: Data, ext: String)? {
+        if let a = self as? ImageAttachment { return (a.original, a.ext) }
         if let data = fileWrapper?.regularFileContents {
             let ext = (fileWrapper?.preferredFilename as NSString?)?.pathExtension ?? ""
             return (data, ext.isEmpty ? "png" : ext)
@@ -109,6 +164,20 @@ final class NotePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     var onDismiss: (() -> Void)?
+    var onFitToContent: (() -> Void)?
+
+    // Double-clicking the title bar (or the green button) fits the window to the note
+    // instead of zooming it to fill the screen.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, event.clickCount == 2,
+           event.locationInWindow.y > contentLayoutRect.maxY {
+            onFitToContent?()
+            return
+        }
+        super.sendEvent(event)
+    }
+
+    override func zoom(_ sender: Any?) { onFitToContent?() }
 
     // The app has no visible menu bar, so handle the usual edit shortcuts here.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -137,7 +206,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panel: NotePanel!
     var textView: NoteTextView!
     var copyButton: NSButton!
+    var scroll: NSScrollView!
     var statusItem: NSStatusItem!
+    var appearanceItems: [NSMenuItem] = []
     var hotKeyRef: EventHotKeyRef?
 
     let notesDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -150,7 +221,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         migrateOldNotes()
         buildPanel()
         buildStatusItem()
+        applyAppearance()
         registerHotKey()
+    }
+
+    // MARK: Fit to content
+
+    func windowDidResize(_ notification: Notification) {
+        textView.rescaleImages()
+    }
+
+    /// Grow or shrink the window's height to show the whole note (keeping its top edge
+    /// where it is), within the screen.
+    func fitToContent() {
+        guard let lm = textView.layoutManager, let tc = textView.textContainer else { return }
+        lm.ensureLayout(for: tc)
+        let textHeight = lm.usedRect(for: tc).height + textView.textContainerInset.height * 2
+        let chrome = panel.frame.height - scroll.contentSize.height   // title bar + bottom bar
+        let visible = (panel.screen ?? NSScreen.main)?.visibleFrame
+        var height = max(panel.minSize.height, ceil(textHeight + chrome))
+        if let visible { height = min(height, visible.height) }
+        var frame = panel.frame
+        frame.origin.y = frame.maxY - height
+        frame.size.height = height
+        if let visible, frame.minY < visible.minY { frame.origin.y = visible.minY }
+        panel.setFrame(frame, display: true, animate: true)
     }
 
     // MARK: Panel
@@ -169,19 +264,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.minSize = NSSize(width: 240, height: 160)
         panel.delegate = self
         panel.onDismiss = { [weak self] in self?.saveAndHide() }
+        panel.onFitToContent = { [weak self] in self?.fitToContent() }
         panel.center()
         panel.setFrameAutosaveName("PopNotePanel")
 
         let content = panel.contentView!
         let barHeight: CGFloat = 40
 
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: barHeight, width: content.bounds.width,
+        scroll = NSScrollView(frame: NSRect(x: 0, y: barHeight, width: content.bounds.width,
                                                 height: content.bounds.height - barHeight - 28))
         scroll.autoresizingMask = [.width, .height]
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
 
-        textView = NoteTextView(frame: scroll.contentView.bounds)
+        // TextKit 1, so images can be re-fitted and the note's height measured.
+        textView = NoteTextView(usingTextLayoutManager: false)
+        textView.frame = scroll.contentView.bounds
+        textView.minSize = NSSize(width: 0, height: scroll.contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
         textView.autoresizingMask = [.width]
         textView.isRichText = true          // needed to hold images; paste still strips formatting
         textView.importsGraphics = true     // accept image drags
@@ -267,7 +370,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             pb.clearContents()
             if noteHasImages {
                 // Rich copy so Notes, Mail, Pages etc. get the pictures too.
-                let s = textView.attributedString()
+                // Swap each thumbnail for the full-resolution original.
+                let s = NSMutableAttributedString(attributedString: textView.attributedString())
+                s.enumerateAttribute(.attachment, in: NSRange(location: 0, length: s.length)) { value, range, _ in
+                    guard let a = value as? NSTextAttachment, let (data, ext) = a.imageFile else { return }
+                    let wrapper = FileWrapper(regularFileWithContents: data)
+                    wrapper.preferredFilename = "image.\(ext)"
+                    s.addAttribute(.attachment, value: NSTextAttachment(fileWrapper: wrapper), range: range)
+                }
                 if let rtfd = s.rtfd(from: NSRange(location: 0, length: s.length), documentAttributes: [:]) {
                     pb.setData(rtfd, forType: .rtfd)
                 }
@@ -370,10 +480,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin(_:)), keyEquivalent: "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
+
+        let appearanceMenu = NSMenu()
+        for (title, mode) in [("Follow System", "system"), ("Light", "light"), ("Dark", "dark")] {
+            let item = NSMenuItem(title: title, action: #selector(chooseAppearance(_:)), keyEquivalent: "")
+            item.representedObject = mode
+            item.target = self
+            appearanceMenu.addItem(item)
+            appearanceItems.append(item)
+        }
+        let appearance = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        appearance.submenu = appearanceMenu
+        menu.addItem(appearance)
+
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit PopNote", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) { item.target = self }
+        for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) && item.submenu == nil {
+            item.target = self
+        }
         statusItem.menu = menu
+    }
+
+    // MARK: Appearance (saved between launches)
+
+    @objc func chooseAppearance(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(sender.representedObject as? String, forKey: "appearance")
+        applyAppearance()
+    }
+
+    func applyAppearance() {
+        let mode = UserDefaults.standard.string(forKey: "appearance") ?? "system"
+        switch mode {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: NSApp.appearance = nil
+        }
+        for item in appearanceItems { item.state = (item.representedObject as? String) == mode ? .on : .off }
     }
 
     @objc func openNotesFolder() { NSWorkspace.shared.open(notesDir) }
