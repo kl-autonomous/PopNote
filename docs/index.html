@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PopNote</title>
+<link rel="icon" href="icon.png">
 <meta name="description" content="A floating note for macOS. One shortcut opens it over everything, the same shortcut saves it.">
 <style>
   :root {
@@ -59,10 +60,15 @@
   code { font: 14px/1.5 ui-monospace, "SF Mono", Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
   pre { background: var(--code-bg); padding: 14px 16px; border-radius: 10px; overflow-x: auto; margin: 0 0 14px; }
   pre code { background: none; padding: 0; }
+  .logo { display: block; width: 96px; height: 96px; margin: 0 0 12px -8px; }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
   .button {
     display: inline-block; padding: 9px 18px; border-radius: 9px; text-decoration: none;
     background: var(--accent); color: #fff; font-weight: 600;
   }
+  .note { color: var(--muted); font-size: 14px; }
+  ol { padding-left: 22px; margin: 0 0 14px; }
+  li { margin-bottom: 6px; }
   footer { margin-top: 56px; color: var(--muted); font-size: 14px; }
   @media (max-width: 520px) {
     main { padding-top: 36px; }
@@ -74,10 +80,15 @@
 </head>
 <body>
 <main>
+  <img class="logo" src="icon.png" width="96" height="96" alt="">
   <h1>PopNote</h1>
   <p class="lede"><strong>A note that's one keystroke away.</strong> Jot an idea down without leaving what you're doing, then hand it to an AI later.</p>
 
-  <a class="button" href="https://github.com/kl-autonomous/PopNote">Get it on GitHub</a>
+  <div class="actions">
+    <a class="button" href="https://github.com/kl-autonomous/PopNote/releases/latest/download/PopNote.dmg">Download for Mac</a>
+    <a href="https://github.com/kl-autonomous/PopNote">Source on GitHub</a>
+  </div>
+  <p class="note" style="margin-top:10px">macOS 13 or later · Apple silicon and Intel · free</p>
 
   <figure>
     <picture>
@@ -112,12 +123,13 @@
   <p>Each note is a Markdown file in <code>~/Documents/PopNote/</code>, named by date and first line. Images are saved at full resolution in <code>attachments/</code> next to them. No account, no cloud, nothing else to set up.</p>
 
   <h2>Install</h2>
-  <p>macOS 13 or later, with the Xcode Command Line Tools (<code>xcode-select --install</code>).</p>
-<pre><code>git clone https://github.com/kl-autonomous/PopNote.git
-cd PopNote
-./build.sh
-open /Applications/PopNote.app</code></pre>
+  <ol>
+    <li><a href="https://github.com/kl-autonomous/PopNote/releases/latest/download/PopNote.dmg">Download PopNote.dmg</a>, open it, and drag PopNote to Applications.</li>
+    <li>Open PopNote. macOS will say it can't check the app for malware. That's because it isn't notarized by Apple, not because anything is wrong.</li>
+    <li>Go to <strong>System Settings → Privacy &amp; Security</strong>, scroll down, and click <strong>Open Anyway</strong>. You only do this once.</li>
+  </ol>
   <p>PopNote lives in the menu bar. Turn on <strong>Launch at Login</strong> there.</p>
+  <p class="note">Prefer to build it yourself? Clone the repo and run <code>./build.sh</code> (needs the Xcode Command Line Tools).</p>
 
   <footer>MIT licensed · <a href="https://github.com/kl-autonomous/PopNote">Source on GitHub</a></footer>
 </main>

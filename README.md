@@ -1,8 +1,10 @@
+<img src="docs/icon.png" width="96" alt="">
+
 # PopNote
 
 A note that's one keystroke away. Jot an idea down without leaving what you're doing, then hand it to an AI later.
 
-**[Website →](https://kl-autonomous.github.io/PopNote/)**
+**[Download for Mac](https://github.com/kl-autonomous/PopNote/releases/latest/download/PopNote.dmg)** · [Website](https://kl-autonomous.github.io/PopNote/)
 
 <img src="docs/note-light.png" width="420" alt="The PopNote window holding notes on a paper, a pasted chart, and a question to ask an AI.">
 
@@ -22,16 +24,22 @@ Notes are Markdown files in `~/Documents/PopNote/`, with images in `attachments/
 
 ## Install
 
-macOS 13 or later, with the Xcode Command Line Tools (`xcode-select --install`).
+1. [Download PopNote.dmg](https://github.com/kl-autonomous/PopNote/releases/latest/download/PopNote.dmg), open it, and drag PopNote to Applications.
+2. Open PopNote. macOS will block it the first time because it isn't notarized by Apple.
+3. Go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway**. Only needed once.
+
+PopNote lives in the menu bar. Turn on **Launch at Login** there. Requires macOS 13 or later.
+
+### Build from source
+
+Needs the Xcode Command Line Tools (`xcode-select --install`).
 
 ```bash
 git clone https://github.com/kl-autonomous/PopNote.git
 cd PopNote
-./build.sh
-open /Applications/PopNote.app
+./build.sh        # builds and installs to /Applications
+./release.sh      # builds build/PopNote.dmg
 ```
-
-PopNote lives in the menu bar. Turn on **Launch at Login** there.
 
 ## License
 
