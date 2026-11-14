@@ -53,7 +53,22 @@ final class ImageAttachment: NSTextAttachment {
 
 final class NoteTextView: NSTextView {
     static let maxImageHeight: CGFloat = 240
-    let baseFont = NSFont.systemFont(ofSize: 14)
+    static let defaultFontSize: CGFloat = 14
+    var fontSize: CGFloat = {
+        let saved = UserDefaults.standard.double(forKey: "fontSize")
+        return saved > 0 ? saved : NoteTextView.defaultFontSize
+    }()
+    var baseFont: NSFont { .systemFont(ofSize: fontSize) }
+
+    /// ⌘+ / ⌘- / ⌘0. Changes the size of all text in the note; remembered between launches.
+    func zoom(by step: CGFloat) {
+        fontSize = step == 0 ? Self.defaultFontSize : min(40, max(9, fontSize + step))
+        UserDefaults.standard.set(Double(fontSize), forKey: "fontSize")
+        if let storage = textStorage, storage.length > 0 {
+            storage.addAttribute(.font, value: baseFont, range: NSRange(location: 0, length: storage.length))
+        }
+        resetTypingAttributes()
+    }
 
     /// Width an image may take up: the text area minus its side padding.
     var imageWidthLimit: CGFloat {
@@ -160,19 +175,110 @@ extension NSTextAttachment {
     }
 }
 
+/// Dims the note and shows a four-way move arrow while ⌥ is held.
+final class MoveOverlay: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
+        let config = NSImage.SymbolConfiguration(pointSize: 44, weight: .medium)
+        let icon = NSImageView(image: NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right",
+                                              accessibilityDescription: "Move")!.withSymbolConfiguration(config)!)
+        icon.contentTintColor = .white
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(icon)
+        NSLayoutConstraint.activate([
+            icon.centerXAnchor.constraint(equalTo: centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
+    override func hitTest(_ point: NSPoint) -> NSView? { isHidden ? nil : self }  // swallow clicks while shown
+}
+
 final class NotePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     var onDismiss: (() -> Void)?
     var onFitToContent: (() -> Void)?
+    var onZoom: ((CGFloat) -> Void)?
 
-    // Double-clicking the title bar (or the green button) fits the window to the note
-    // instead of zooming it to fill the screen.
+    // MARK: Hold ⌥ to move
+
+    private lazy var moveOverlay: MoveOverlay = {
+        let v = MoveOverlay(frame: contentView!.bounds)
+        v.autoresizingMask = [.width, .height]
+        v.isHidden = true
+        v.alphaValue = 0
+        contentView!.addSubview(v)
+        return v
+    }()
+    private var pendingMoveMode: DispatchWorkItem?
+    private(set) var inMoveMode = false
+
+    private func optionOnly(_ flags: NSEvent.ModifierFlags) -> Bool {
+        flags.intersection([.command, .option, .control, .shift]) == .option
+    }
+
+    private func updateMoveMode(_ flags: NSEvent.ModifierFlags) {
+        pendingMoveMode?.cancel()
+        if optionOnly(flags), isKeyWindow {
+            // Short delay so ⌥⌘N and ⌥-typed characters don't flash the overlay.
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.optionOnly(NSEvent.modifierFlags), self.isKeyWindow else { return }
+                self.setMoveMode(true)
+            }
+            pendingMoveMode = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+        } else {
+            setMoveMode(false)
+        }
+    }
+
+    func setMoveMode(_ on: Bool) {
+        if !on { pendingMoveMode?.cancel() }
+        guard on != inMoveMode else { return }
+        inMoveMode = on
+        let overlay = moveOverlay
+        overlay.superview?.addSubview(overlay, positioned: .above, relativeTo: nil)  // stay on top
+        if on { overlay.isHidden = false }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.12
+            overlay.animator().alphaValue = on ? 1 : 0
+        }, completionHandler: { [weak self] in
+            if self?.inMoveMode == false { overlay.isHidden = true }
+        })
+        invalidateCursorRects(for: overlay)
+    }
+
+    override func resignKey() {
+        super.resignKey()
+        setMoveMode(false)
+    }
+
+    override func orderOut(_ sender: Any?) {
+        setMoveMode(false)
+        super.orderOut(sender)
+    }
+
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .leftMouseDown, event.clickCount == 2,
-           event.locationInWindow.y > contentLayoutRect.maxY {
+        switch event.type {
+        case .flagsChanged:
+            updateMoveMode(event.modifierFlags)
+        case .leftMouseDown where inMoveMode || optionOnly(event.modifierFlags):
+            // Drag the window from anywhere while ⌥ is held.
+            NSCursor.closedHand.push()
+            performDrag(with: event)
+            NSCursor.pop()
+            return
+        case .leftMouseDown where event.clickCount == 2 && event.locationInWindow.y > contentLayoutRect.maxY:
+            // Double-clicking the title bar fits the window to the note instead of
+            // zooming it to fill the screen.
             onFitToContent?()
             return
+        default: break
         }
         super.sendEvent(event)
     }
@@ -192,6 +298,9 @@ final class NotePanel: NSPanel {
             case "a": action = #selector(NSText.selectAll(_:))
             case "z": action = flags.contains(.shift) ? Selector(("redo:")) : Selector(("undo:"))
             case "w": onDismiss?(); return true
+            case "=", "+": onZoom?(2); return true
+            case "-", "_": onZoom?(-2); return true
+            case "0": onZoom?(0); return true
             default: break
             }
             if let action, NSApp.sendAction(action, to: nil, from: self) { return true }
@@ -265,6 +374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.delegate = self
         panel.onDismiss = { [weak self] in self?.saveAndHide() }
         panel.onFitToContent = { [weak self] in self?.fitToContent() }
+        panel.onZoom = { [weak self] step in self?.textView.zoom(by: step) }
         panel.center()
         panel.setFrameAutosaveName("PopNotePanel")
 
