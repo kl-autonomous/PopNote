@@ -397,7 +397,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     var scroll: NSScrollView!
     var statusItem: NSStatusItem!
     var appearanceItems: [NSMenuItem] = []
-    var glassBlur: NSVisualEffectView!
     var glassTint: GlassTint!
     var glassItem: NSMenuItem!
     var opacitySlider: NSSlider!
@@ -467,13 +466,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let content = panel.contentView!
         let barHeight: CGFloat = 40
 
-        // Glass look: a blur of what's behind the window, with a tint on top. Hidden unless on.
-        glassBlur = NSVisualEffectView(frame: content.bounds)
-        glassBlur.autoresizingMask = [.width, .height]
-        glassBlur.material = .popover
-        glassBlur.blendingMode = .behindWindow
-        glassBlur.state = .active
-        content.addSubview(glassBlur)
+        // Glass look: the window colour at the chosen opacity, over a real blur of what's
+        // behind (see setBlurRadius). Hidden unless on.
         glassTint = GlassTint(frame: content.bounds)
         glassTint.autoresizingMask = [.width, .height]
         content.addSubview(glassTint)
@@ -482,6 +476,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                                                 height: content.bounds.height - barHeight - 28))
         scroll.autoresizingMask = [.width, .height]
         scroll.hasVerticalScroller = true
+        scroll.scrollerStyle = .overlay      // no permanent track (it shows through glass)
+        scroll.autohidesScrollers = true
         scroll.drawsBackground = false
 
         // TextKit 1, so images can be re-fitted and the note's height measured.
@@ -811,6 +807,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         glassItem.target = self
         appearanceMenu.addItem(glassItem)
         let (opacityItem, oSlider) = sliderItem("Opacity", action: #selector(glassSliderMoved(_:)))
+        oSlider.minValue = Self.minGlassOpacity
         let (blurItem, bSlider) = sliderItem("Blur", action: #selector(glassSliderMoved(_:)))
         opacitySlider = oSlider
         blurSlider = bSlider
@@ -846,9 +843,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         return (item, slider)
     }
 
+    /// Opacity never goes below this, so the note stays readable and clickable.
+    static let minGlassOpacity = 0.3
+    /// Blur radius in points at the top of the Blur slider.
+    static let maxBlurRadius = 40.0
+
     var glassOn: Bool { UserDefaults.standard.bool(forKey: "glass") }
-    var glassOpacity: Double { UserDefaults.standard.object(forKey: "glassOpacity") as? Double ?? 0.35 }
-    var glassBlurAmount: Double { UserDefaults.standard.object(forKey: "glassBlur") as? Double ?? 1.0 }
+    var glassOpacity: Double {
+        max(Self.minGlassOpacity, min(1, UserDefaults.standard.object(forKey: "glassOpacity") as? Double ?? 0.45))
+    }
+    var glassBlurAmount: Double {
+        max(0, min(1, UserDefaults.standard.object(forKey: "glassBlur") as? Double ?? 0.6))
+    }
+
+    /// Real background blur with an adjustable radius. This is a private (but long-stable)
+    /// window-server call, the same one iTerm2 uses; looked up at run time so PopNote still
+    /// runs if it ever disappears, just without blur.
+    func setBlurRadius(_ radius: Int) {
+        typealias ConnFn = @convention(c) () -> UInt32
+        typealias BlurFn = @convention(c) (UInt32, UInt32, Int32) -> Int32
+        guard let connSym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGSDefaultConnectionForThread"),
+              let blurSym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGSSetWindowBackgroundBlurRadius") else { return }
+        let conn = unsafeBitCast(connSym, to: ConnFn.self)()
+        _ = unsafeBitCast(blurSym, to: BlurFn.self)(conn, UInt32(panel.windowNumber), Int32(radius))
+    }
 
     @objc func toggleGlass() {
         UserDefaults.standard.set(!glassOn, forKey: "glass")
@@ -860,16 +878,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         applyGlass()
     }
 
-    /// Opacity = how much of the window colour covers the glass (0 = clear, 1 = solid).
-    /// Blur = how strongly what's behind the window is blurred (0 = sharp, 1 = full blur).
+    /// Opacity = how much of the window colour covers the glass (30 % to solid).
+    /// Blur = blur radius of what's behind the window (sharp to 40 pt).
     func applyGlass() {
         let on = glassOn
         panel.isOpaque = !on
         panel.backgroundColor = on ? .clear : .windowBackgroundColor
-        glassBlur.isHidden = !on
         glassTint.isHidden = !on
-        glassBlur.alphaValue = glassBlurAmount
         glassTint.opacity = glassOpacity
+        setBlurRadius(on ? Int((glassBlurAmount * Self.maxBlurRadius).rounded()) : 0)
         glassItem.state = on ? .on : .off
         opacitySlider.doubleValue = glassOpacity
         blurSlider.doubleValue = glassBlurAmount
