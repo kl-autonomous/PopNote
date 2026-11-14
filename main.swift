@@ -529,9 +529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         if panel.isVisible && !panel.isOnActiveSpace {
             // Locked to another Space: bring it here (still locked) instead of saving it away.
             panel.orderOut(nil)
-            panel.orderFrontRegardless()
-            panel.makeKey()
-            panel.makeFirstResponder(textView)
+            focusNote()
             return
         }
         panel.isVisible ? saveAndHide() : showNewNote()
@@ -546,9 +544,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - panel.frame.width / 2,
                                          y: screen.visibleFrame.midY - panel.frame.height / 2))
         }
+        focusNote()
+    }
+
+    /// Shows the note and makes PopNote the active app. Without that, the app behind
+    /// (say a full-screen PDF) keeps receiving some keys, like the arrow keys, especially
+    /// with an input method on.
+    func focusNote() {
+        NSApp.unhideWithoutActivation()
         panel.orderFrontRegardless()
+        activateApp()
         panel.makeKey()
         panel.makeFirstResponder(textView)
+    }
+
+    func activateApp() {
+        if #available(macOS 14.0, *) { NSApp.activate() } else { NSApp.activate(ignoringOtherApps: true) }
+    }
+
+    /// Clicking back into the note after using another app makes PopNote active again.
+    func windowDidBecomeKey(_ notification: Notification) {
+        if !NSApp.isActive { activateApp() }
     }
 
     // MARK: Browsing saved notes (⌘↑ / ⌘↓)
@@ -643,6 +659,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         textView.string = ""
         hint.stringValue = defaultHint
         panel.orderOut(nil)
+        // Give the keyboard back to the app you were in.
+        if NSApp.isActive { NSApp.hide(nil) }
     }
 
     func isEmpty(_ s: NSAttributedString) -> Bool {
