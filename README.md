@@ -17,6 +17,8 @@ A note that's one keystroke away. Jot an idea down without leaving what you're d
 | **⌘↩** | Save, copy to clipboard (with images), and close. |
 | Hold **⌃** and drag | Move the window from anywhere. |
 | Double-click title bar | Fit the window to the note. |
+| **⌘↑** / **⌘↓** | Flip through saved notes. The new note is kept while you look. |
+| Hold **⌃**, click the lock | Keep the note on the current full-screen app instead of following you. |
 
 Drag or paste images in. They show as small previews and are saved at full resolution.
 

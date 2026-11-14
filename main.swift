@@ -18,6 +18,8 @@ final class ImageAttachment: NSTextAttachment {
     var original = Data()
     var ext = "png"
     var pixelSize = NSSize.zero
+    /// File name in attachments/ once saved, so re-saving a note doesn't copy the image again.
+    var savedName: String?
 
     /// Largest thumbnail edge in pixels: sharp on Retina at the sizes PopNote shows,
     /// without holding a 50-megapixel bitmap in memory.
@@ -68,6 +70,11 @@ final class NoteTextView: NSTextView {
     func zoom(by step: CGFloat) {
         fontSize = step == 0 ? Self.defaultFontSize : min(40, max(9, fontSize + step))
         UserDefaults.standard.set(Double(fontSize), forKey: "fontSize")
+        applyFontSize()
+    }
+
+    /// Puts all text in the current size and re-fits images.
+    func applyFontSize() {
         if let storage = textStorage, storage.length > 0 {
             storage.addAttribute(.font, value: baseFont, range: NSRange(location: 0, length: storage.length))
         }
@@ -180,8 +187,22 @@ extension NSTextAttachment {
     }
 }
 
-/// Dims the note and shows a four-way move arrow while ⌃ (Control) is held.
+/// The see-through layer of the glass look: the window colour at a chosen opacity,
+/// drawn over the blur.
+final class GlassTint: NSView {
+    var opacity: CGFloat = 0.35 { didSet { needsDisplay = true } }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.withAlphaComponent(opacity).setFill()
+        dirtyRect.fill(using: .sourceOver)
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Dims the note and shows a four-way move arrow while ⌃ (Control) is held, with a
+/// lock / unlock button above it.
 final class MoveOverlay: NSView {
+    let lockIcon = NSImageView()
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
@@ -192,14 +213,32 @@ final class MoveOverlay: NSView {
         icon.contentTintColor = .white
         icon.translatesAutoresizingMaskIntoConstraints = false
         addSubview(icon)
+        lockIcon.contentTintColor = .white
+        lockIcon.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(lockIcon)
         NSLayoutConstraint.activate([
             icon.centerXAnchor.constraint(equalTo: centerXAnchor),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            lockIcon.centerXAnchor.constraint(equalTo: centerXAnchor),
+            lockIcon.bottomAnchor.constraint(equalTo: icon.topAnchor, constant: -26),
         ])
+        setLocked(false)
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
+    func setLocked(_ locked: Bool) {
+        let config = NSImage.SymbolConfiguration(pointSize: 24, weight: .semibold)
+        lockIcon.image = NSImage(systemSymbolName: locked ? "lock.fill" : "lock.open",
+                                 accessibilityDescription: locked ? "Unlock" : "Lock")!.withSymbolConfiguration(config)
+    }
+
+    /// Generous click target around the lock icon, in this view's coordinates.
+    var lockHitRect: NSRect { lockIcon.frame.insetBy(dx: -12, dy: -10) }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+        addCursorRect(lockHitRect, cursor: .pointingHand)
+    }
     override func hitTest(_ point: NSPoint) -> NSView? { isHidden ? nil : self }  // swallow clicks while shown
 }
 
@@ -209,6 +248,23 @@ final class NotePanel: NSPanel {
     var onDismiss: (() -> Void)?
     var onFitToContent: (() -> Void)?
     var onZoom: ((CGFloat) -> Void)?
+    var onBrowse: ((Int) -> Void)?   // +1 = older note, -1 = newer
+
+    // MARK: Window lock
+
+    static let followBehavior: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+    static let lockedBehavior: NSWindow.CollectionBehavior = [.fullScreenAuxiliary, .ignoresCycle]
+
+    /// Unlocked, the note follows you to every Space and full-screen app. Locked, it stays
+    /// on the Space it's on (for example next to a full-screen Preview window).
+    var isLocked = false {
+        didSet {
+            collectionBehavior = isLocked ? Self.lockedBehavior : Self.followBehavior
+            title = isLocked ? "PopNote 🔒" : "PopNote"
+            moveOverlay.setLocked(isLocked)
+            invalidateCursorRects(for: moveOverlay)
+        }
+    }
 
     // MARK: Hold ⌃ to move
 
@@ -272,6 +328,10 @@ final class NotePanel: NSPanel {
         switch event.type {
         case .flagsChanged:
             updateMoveMode(event.modifierFlags)
+        case .leftMouseDown where inMoveMode
+            && moveOverlay.lockHitRect.contains(moveOverlay.convert(event.locationInWindow, from: nil)):
+            isLocked.toggle()
+            return
         case .leftMouseDown where inMoveMode || controlOnly(event.modifierFlags):
             // Drag the window from anywhere while ⌃ is held (this also stops ⌃-click opening a menu).
             NSCursor.closedHand.push()
@@ -293,6 +353,12 @@ final class NotePanel: NSPanel {
     // The app has no visible menu bar, so handle the usual edit shortcuts here.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // ⌘↑ / ⌘↓: step through saved notes.
+        if event.type == .keyDown, flags.intersection([.command, .option, .control, .shift]) == .command,
+           event.keyCode == UInt16(kVK_UpArrow) || event.keyCode == UInt16(kVK_DownArrow) {
+            onBrowse?(event.keyCode == UInt16(kVK_UpArrow) ? 1 : -1)
+            return true
+        }
         if event.type == .keyDown, flags.contains(.command) {
             let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
             var action: Selector?
@@ -316,13 +382,26 @@ final class NotePanel: NSPanel {
     override func cancelOperation(_ sender: Any?) { onDismiss?() }  // Esc
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDelegate {
     var panel: NotePanel!
     var textView: NoteTextView!
     var copyButton: NSButton!
+    var hint: NSTextField!
+    let defaultHint = "⌥⌘N / Esc: save  ·  ⌘↩: save + copy"
+
+    // ⌘↑ / ⌘↓ browsing. page -1 is the new note; 0, 1, 2… are saved notes, newest first.
+    var page = -1
+    var savedNotes: [URL] = []
+    var draft: NSAttributedString?   // the new note, kept aside while an older one is shown
+    var dirty = false                // the shown note was edited since it was loaded
     var scroll: NSScrollView!
     var statusItem: NSStatusItem!
     var appearanceItems: [NSMenuItem] = []
+    var glassBlur: NSVisualEffectView!
+    var glassTint: GlassTint!
+    var glassItem: NSMenuItem!
+    var opacitySlider: NSSlider!
+    var blurSlider: NSSlider!
     var hotKeyRef: EventHotKeyRef?
 
     let notesDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -336,6 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         buildPanel()
         buildStatusItem()
         applyAppearance()
+        applyGlass()
         registerHotKey()
     }
 
@@ -380,11 +460,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.onDismiss = { [weak self] in self?.saveAndHide() }
         panel.onFitToContent = { [weak self] in self?.fitToContent() }
         panel.onZoom = { [weak self] step in self?.textView.zoom(by: step) }
+        panel.onBrowse = { [weak self] step in self?.browse(step) }
         panel.center()
         panel.setFrameAutosaveName("PopNotePanel")
 
         let content = panel.contentView!
         let barHeight: CGFloat = 40
+
+        // Glass look: a blur of what's behind the window, with a tint on top. Hidden unless on.
+        glassBlur = NSVisualEffectView(frame: content.bounds)
+        glassBlur.autoresizingMask = [.width, .height]
+        glassBlur.material = .popover
+        glassBlur.blendingMode = .behindWindow
+        glassBlur.state = .active
+        content.addSubview(glassBlur)
+        glassTint = GlassTint(frame: content.bounds)
+        glassTint.autoresizingMask = [.width, .height]
+        content.addSubview(glassTint)
 
         scroll = NSScrollView(frame: NSRect(x: 0, y: barHeight, width: content.bounds.width,
                                                 height: content.bounds.height - barHeight - 28))
@@ -410,10 +502,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         textView.drawsBackground = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
+        textView.delegate = self
         scroll.documentView = textView
         content.addSubview(scroll)
 
-        let hint = NSTextField(labelWithString: "⌥⌘N / Esc: save  ·  ⌘↩: save + copy")
+        hint = NSTextField(labelWithString: defaultHint)
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
         hint.lineBreakMode = .byTruncatingTail
@@ -437,14 +530,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func toggle() {
+        if panel.isVisible && !panel.isOnActiveSpace {
+            // Locked to another Space: bring it here (still locked) instead of saving it away.
+            panel.orderOut(nil)
+            panel.orderFrontRegardless()
+            panel.makeKey()
+            panel.makeFirstResponder(textView)
+            return
+        }
         panel.isVisible ? saveAndHide() : showNewNote()
     }
 
     @objc func showNewNote() {
         if panel.isVisible { return }
-        textView.string = ""
-        textView.resetTypingAttributes()
-        textView.undoManager?.removeAllActions()
+        show(NSAttributedString(), page: -1)
         // Keep the note on screen even if a display was unplugged.
         if let screen = NSScreen.screens.first(where: { $0.frame.intersects(panel.frame) }) ?? NSScreen.main,
            !screen.visibleFrame.contains(panel.frame) {
@@ -456,28 +555,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.makeFirstResponder(textView)
     }
 
+    // MARK: Browsing saved notes (⌘↑ / ⌘↓)
+
+    func textDidChange(_ notification: Notification) { dirty = true }
+
+    /// Saved notes, newest first: by the date in the file name ("2026-11-14 0825"), then by
+    /// creation time for notes saved in the same minute.
+    func listSavedNotes() -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: notesDir, includingPropertiesForKeys: [.creationDateKey])) ?? []
+        func key(_ u: URL) -> (String, Date) {
+            (String(u.lastPathComponent.prefix(15)),
+             (try? u.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast)
+        }
+        return files.filter { $0.pathExtension == "md" }.sorted {
+            let a = key($0), b = key($1)
+            return a.0 != b.0 ? a.0 > b.0 : a.1 > b.1
+        }
+    }
+
+    func browse(_ step: Int) {
+        if page == -1 { savedNotes = listSavedNotes() }
+        let target = page + step
+        guard target >= -1, target < savedNotes.count else { NSSound.beep(); return }
+        leaveCurrentPage()
+        if target == -1 {
+            show(draft ?? NSAttributedString(), page: -1)
+            draft = nil
+        } else {
+            show(loadNote(savedNotes[target]), page: target)
+        }
+    }
+
+    /// Before switching away: keep the new note aside, or write edits to a saved note.
+    func leaveCurrentPage() {
+        let current = NSAttributedString(attributedString: textView.attributedString())
+        if page == -1 { draft = current }
+        else if dirty { overwrite(savedNotes[page], with: current) }
+    }
+
+    func show(_ note: NSAttributedString, page newPage: Int) {
+        page = newPage
+        textView.textStorage?.setAttributedString(note)
+        textView.applyFontSize()
+        textView.setSelectedRange(NSRange(location: textView.string.utf16.count, length: 0))
+        textView.resetTypingAttributes()
+        textView.undoManager?.removeAllActions()
+        textView.rescaleImages()
+        textView.scrollToEndOfDocument(nil)
+        dirty = false
+        if page == -1 {
+            hint.stringValue = defaultHint
+        } else {
+            let name = savedNotes[page].deletingPathExtension().lastPathComponent
+            hint.stringValue = "\(page + 1) of \(savedNotes.count) · \(name)"
+        }
+    }
+
+    /// Reads a saved note back, turning ![](attachments/…) links into inline images.
+    func loadNote(_ url: URL) -> NSAttributedString {
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let attrs: [NSAttributedString.Key: Any] = [.font: textView.baseFont, .foregroundColor: NSColor.textColor]
+        let out = NSMutableAttributedString()
+        let regex = try! NSRegularExpression(pattern: #"!\[[^\]]*\]\(attachments/([^)\s]+)\)"#)
+        let ns = text as NSString
+        var cursor = 0
+        for m in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            out.append(NSAttributedString(string: ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor)), attributes: attrs))
+            let name = ns.substring(with: m.range(at: 1)).removingPercentEncoding ?? ns.substring(with: m.range(at: 1))
+            let file = notesDir.appendingPathComponent("attachments").appendingPathComponent(name)
+            if let data = try? Data(contentsOf: file),
+               let a = ImageAttachment(data: data, ext: file.pathExtension.isEmpty ? "png" : file.pathExtension) {
+                a.savedName = name
+                a.fit(width: textView.imageWidthLimit, height: NoteTextView.maxImageHeight, zoom: textView.zoomFactor)
+                out.append(NSAttributedString(attachment: a))
+            } else {
+                out.append(NSAttributedString(string: ns.substring(with: m.range), attributes: attrs))  // keep a broken link as text
+            }
+            cursor = m.range.location + m.range.length
+        }
+        out.append(NSAttributedString(string: ns.substring(from: cursor), attributes: attrs))
+        return out
+    }
+
     func saveAndHide() {
-        saveCurrentNote()
+        leaveCurrentPage()
+        // Whatever page is showing, a non-empty new note is saved too.
+        if let draft, !isEmpty(draft) { saveNew(draft) }
+        draft = nil
+        page = -1
+        dirty = false
+        textView.string = ""
+        hint.stringValue = defaultHint
         panel.orderOut(nil)
     }
 
-    var noteHasImages: Bool {
+    func isEmpty(_ s: NSAttributedString) -> Bool {
+        s.string.replacingOccurrences(of: "\u{FFFC}", with: "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !hasImages(s)
+    }
+
+    func hasImages(_ s: NSAttributedString) -> Bool {
         var found = false
-        let s = textView.attributedString()
         s.enumerateAttribute(.attachment, in: NSRange(location: 0, length: s.length)) { value, _, stop in
             if value != nil { found = true; stop.pointee = true }
         }
         return found
     }
 
+    var noteHasImages: Bool { hasImages(textView.attributedString()) }
+
     /// The note's text with the image placeholders removed.
     var plainText: String {
         textView.string.replacingOccurrences(of: "\u{FFFC}", with: "")
     }
 
-    var noteIsEmpty: Bool {
-        plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !noteHasImages
-    }
+    var noteIsEmpty: Bool { isEmpty(textView.attributedString()) }
 
     @objc func copyAndHide() {
         if !noteIsEmpty {
@@ -502,19 +694,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         saveAndHide()
     }
 
-    func saveCurrentNote() {
-        guard !noteIsEmpty else { return }
+    func saveNew(_ note: NSAttributedString) {
         do {
-            let markdown = try markdownSavingImages()
+            let markdown = try markdownSavingImages(note)
             try markdown.write(to: newNoteURL(for: markdown, date: Date()), atomically: true, encoding: .utf8)
         } catch { NSSound.beep() }
-        textView.string = ""
     }
 
-    /// Turns the note into Markdown. Each image is written to ~/Documents/PopNote/attachments/
-    /// and replaced by a ![](attachments/…) link.
-    func markdownSavingImages() throws -> String {
-        let s = textView.attributedString()
+    /// Writes edits back to a saved note, keeping its file name. Written in place (not
+    /// atomically) so the file keeps its creation date and its spot in ⌘↑ order.
+    func overwrite(_ url: URL, with note: NSAttributedString) {
+        do { try markdownSavingImages(note).write(to: url, atomically: false, encoding: .utf8) }
+        catch { NSSound.beep() }
+    }
+
+    /// Turns a note into Markdown. Each image is written to ~/Documents/PopNote/attachments/
+    /// (unless it's already there) and replaced by a ![](attachments/…) link.
+    func markdownSavingImages(_ s: NSAttributedString) throws -> String {
         let attachmentsDir = notesDir.appendingPathComponent("attachments", isDirectory: true)
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyyMMdd-HHmmss"
@@ -527,6 +723,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 out += (s.string as NSString).substring(with: range)
                 return
             }
+            if let a = attachment as? ImageAttachment, let name = a.savedName,
+               FileManager.default.fileExists(atPath: attachmentsDir.appendingPathComponent(name).path) {
+                out += "![](attachments/\(name))"
+                return
+            }
             guard let (data, ext) = attachment.imageFile else { return }
             do {
                 try FileManager.default.createDirectory(at: attachmentsDir, withIntermediateDirectories: true)
@@ -534,6 +735,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 repeat { name = "\(stamp)-\(n).\(ext)"; n += 1 }
                 while FileManager.default.fileExists(atPath: attachmentsDir.appendingPathComponent(name).path)
                 try data.write(to: attachmentsDir.appendingPathComponent(name))
+                (attachment as? ImageAttachment)?.savedName = name
                 out += "![](attachments/\(name))"
             } catch { failure = error; stop.pointee = true }
         }
@@ -604,6 +806,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             appearanceMenu.addItem(item)
             appearanceItems.append(item)
         }
+        appearanceMenu.addItem(.separator())
+        glassItem = NSMenuItem(title: "Glass", action: #selector(toggleGlass), keyEquivalent: "")
+        glassItem.target = self
+        appearanceMenu.addItem(glassItem)
+        let (opacityItem, oSlider) = sliderItem("Opacity", action: #selector(glassSliderMoved(_:)))
+        let (blurItem, bSlider) = sliderItem("Blur", action: #selector(glassSliderMoved(_:)))
+        opacitySlider = oSlider
+        blurSlider = bSlider
+        appearanceMenu.addItem(opacityItem)
+        appearanceMenu.addItem(blurItem)
         let appearance = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
         appearance.submenu = appearanceMenu
         menu.addItem(appearance)
@@ -614,6 +826,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             item.target = self
         }
         statusItem.menu = menu
+    }
+
+    // MARK: Glass look (saved between launches)
+
+    func sliderItem(_ title: String, action: Selector) -> (NSMenuItem, NSSlider) {
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 28))
+        let label = NSTextField(labelWithString: title)
+        label.font = .menuFont(ofSize: 0)
+        label.frame = NSRect(x: 22, y: 6, width: 60, height: 16)
+        let slider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: self, action: action)
+        slider.isContinuous = true
+        slider.controlSize = .small
+        slider.frame = NSRect(x: 84, y: 4, width: 132, height: 20)
+        row.addSubview(label)
+        row.addSubview(slider)
+        let item = NSMenuItem()
+        item.view = row
+        return (item, slider)
+    }
+
+    var glassOn: Bool { UserDefaults.standard.bool(forKey: "glass") }
+    var glassOpacity: Double { UserDefaults.standard.object(forKey: "glassOpacity") as? Double ?? 0.35 }
+    var glassBlurAmount: Double { UserDefaults.standard.object(forKey: "glassBlur") as? Double ?? 1.0 }
+
+    @objc func toggleGlass() {
+        UserDefaults.standard.set(!glassOn, forKey: "glass")
+        applyGlass()
+    }
+
+    @objc func glassSliderMoved(_ sender: NSSlider) {
+        UserDefaults.standard.set(sender.doubleValue, forKey: sender === opacitySlider ? "glassOpacity" : "glassBlur")
+        applyGlass()
+    }
+
+    /// Opacity = how much of the window colour covers the glass (0 = clear, 1 = solid).
+    /// Blur = how strongly what's behind the window is blurred (0 = sharp, 1 = full blur).
+    func applyGlass() {
+        let on = glassOn
+        panel.isOpaque = !on
+        panel.backgroundColor = on ? .clear : .windowBackgroundColor
+        glassBlur.isHidden = !on
+        glassTint.isHidden = !on
+        glassBlur.alphaValue = glassBlurAmount
+        glassTint.opacity = glassOpacity
+        glassItem.state = on ? .on : .off
+        opacitySlider.doubleValue = glassOpacity
+        blurSlider.doubleValue = glassBlurAmount
+        opacitySlider.isEnabled = on
+        blurSlider.isEnabled = on
+        panel.invalidateShadow()
     }
 
     // MARK: Appearance (saved between launches)
