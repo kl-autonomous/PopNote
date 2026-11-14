@@ -266,13 +266,6 @@ final class MoveOverlay: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { isHidden ? nil : self }  // swallow clicks while shown
 }
 
-func debugLog(_ msg: String) {
-    let url = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/PopNote-debug.log")
-    let line = "\(Date()) \(msg)\n"
-    if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close() }
-    else { try? line.write(to: url, atomically: true, encoding: .utf8) }
-}
-
 final class NotePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -356,9 +349,6 @@ final class NotePanel: NSPanel {
     }
 
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .keyDown, (123...126).contains(Int(event.keyCode)) {
-            debugLog("panel got arrow keyCode=\(event.keyCode) key=\(isKeyWindow) appActive=\(NSApp.isActive)")
-        }
         switch event.type {
         case .flagsChanged:
             updateMoveMode(event.modifierFlags)
@@ -582,9 +572,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         focusNote()
     }
 
-    /// Shows the note and makes PopNote the active app. Without that, the app behind
-    /// (say a full-screen PDF) keeps receiving some keys, like the arrow keys, especially
-    /// with an input method on.
+    /// Shows the note and makes PopNote the active app. The note is a normal panel, not a
+    /// non-activating one: with a non-activating panel the app behind (say a PDF viewer)
+    /// also received the arrow keys.
     func focusNote() {
         NSApp.unhideWithoutActivation()
         panel.orderFrontRegardless()
@@ -600,10 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
 
     /// Clicking back into the note after using another app makes PopNote active again.
-    func windowDidResignKey(_ notification: Notification) { debugLog("note lost focus") }
-
     func windowDidBecomeKey(_ notification: Notification) {
-        debugLog("note got focus, appActive=\(NSApp.isActive)")
         if !NSApp.isActive { activateApp() }
     }
 
