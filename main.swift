@@ -228,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: Fit to content
 
     func windowDidResize(_ notification: Notification) {
-        textView.rescaleImages()
+        textView?.rescaleImages()   // also fires while the saved frame is restored, before the text view exists
     }
 
     /// Grow or shrink the window's height to show the whole note (keeping its top edge
