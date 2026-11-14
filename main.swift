@@ -21,7 +21,7 @@ final class ImageAttachment: NSTextAttachment {
 
     /// Largest thumbnail edge in pixels: sharp on Retina at the sizes PopNote shows,
     /// without holding a 50-megapixel bitmap in memory.
-    static let thumbnailPixels = 1200
+    static let thumbnailPixels = 2048   // stays sharp when zoomed in
 
     convenience init?(data: Data, ext: String) {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
@@ -43,10 +43,12 @@ final class ImageAttachment: NSTextAttachment {
         image = NSImage(cgImage: thumb, size: NSSize(width: thumb.width, height: thumb.height))
     }
 
-    /// Fit inside the note's width and a maximum height; never enlarge.
-    func fit(width maxW: CGFloat, height maxH: CGFloat) {
+    /// Fit inside the note's width and a maximum height, both at 100% zoom. `zoom` scales
+    /// the height limit and the image's natural size with the text; the width limit is the
+    /// window, so an image never spills past it.
+    func fit(width maxW: CGFloat, height maxH: CGFloat, zoom: CGFloat = 1) {
         guard pixelSize.width > 0, pixelSize.height > 0 else { return }
-        let scale = min(1, maxW / pixelSize.width, maxH / pixelSize.height)
+        let scale = min(zoom, maxW * min(zoom, 1) / pixelSize.width, maxH * zoom / pixelSize.height)
         bounds = CGRect(x: 0, y: 0, width: floor(pixelSize.width * scale), height: floor(pixelSize.height * scale))
     }
 }
@@ -59,8 +61,10 @@ final class NoteTextView: NSTextView {
         return saved > 0 ? saved : NoteTextView.defaultFontSize
     }()
     var baseFont: NSFont { .systemFont(ofSize: fontSize) }
+    /// 1.0 at the default text size; images scale by the same amount as the text.
+    var zoomFactor: CGFloat { fontSize / Self.defaultFontSize }
 
-    /// ⌘+ / ⌘- / ⌘0. Changes the size of all text in the note; remembered between launches.
+    /// ⌘+ / ⌘- / ⌘0. Changes the size of all text and images; remembered between launches.
     func zoom(by step: CGFloat) {
         fontSize = step == 0 ? Self.defaultFontSize : min(40, max(9, fontSize + step))
         UserDefaults.standard.set(Double(fontSize), forKey: "fontSize")
@@ -68,6 +72,7 @@ final class NoteTextView: NSTextView {
             storage.addAttribute(.font, value: baseFont, range: NSRange(location: 0, length: storage.length))
         }
         resetTypingAttributes()
+        rescaleImages()
     }
 
     /// Width an image may take up: the text area minus its side padding.
@@ -76,7 +81,7 @@ final class NoteTextView: NSTextView {
         return max(40, w)
     }
 
-    /// Re-fit every image after the window changes size.
+    /// Re-fit every image after the window changes size or the zoom changes.
     func rescaleImages() {
         guard let storage = textStorage, let lm = layoutManager else { return }
         let full = NSRange(location: 0, length: storage.length)
@@ -84,7 +89,7 @@ final class NoteTextView: NSTextView {
         storage.enumerateAttribute(.attachment, in: full) { value, _, _ in
             guard let a = value as? ImageAttachment else { return }
             let old = a.bounds
-            a.fit(width: imageWidthLimit, height: Self.maxImageHeight)
+            a.fit(width: imageWidthLimit, height: Self.maxImageHeight, zoom: zoomFactor)
             if a.bounds != old { changed = true }
         }
         if changed {
@@ -146,7 +151,7 @@ final class NoteTextView: NSTextView {
         let out = NSMutableAttributedString()
         for (data, ext) in images {
             guard let attachment = ImageAttachment(data: data, ext: ext) else { continue }
-            attachment.fit(width: imageWidthLimit, height: Self.maxImageHeight)
+            attachment.fit(width: imageWidthLimit, height: Self.maxImageHeight, zoom: zoomFactor)
             out.append(NSAttributedString(attachment: attachment))
             out.append(NSAttributedString(string: "\n", attributes: [.font: baseFont, .foregroundColor: NSColor.textColor]))
         }
