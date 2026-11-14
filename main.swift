@@ -175,7 +175,7 @@ extension NSTextAttachment {
     }
 }
 
-/// Dims the note and shows a four-way move arrow while ⌥ is held.
+/// Dims the note and shows a four-way move arrow while ⌃ (Control) is held.
 final class MoveOverlay: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -205,7 +205,7 @@ final class NotePanel: NSPanel {
     var onFitToContent: (() -> Void)?
     var onZoom: ((CGFloat) -> Void)?
 
-    // MARK: Hold ⌥ to move
+    // MARK: Hold ⌃ to move
 
     private lazy var moveOverlay: MoveOverlay = {
         let v = MoveOverlay(frame: contentView!.bounds)
@@ -218,16 +218,16 @@ final class NotePanel: NSPanel {
     private var pendingMoveMode: DispatchWorkItem?
     private(set) var inMoveMode = false
 
-    private func optionOnly(_ flags: NSEvent.ModifierFlags) -> Bool {
-        flags.intersection([.command, .option, .control, .shift]) == .option
+    private func controlOnly(_ flags: NSEvent.ModifierFlags) -> Bool {
+        flags.intersection([.command, .option, .control, .shift]) == .control
     }
 
     private func updateMoveMode(_ flags: NSEvent.ModifierFlags) {
         pendingMoveMode?.cancel()
-        if optionOnly(flags), isKeyWindow {
-            // Short delay so ⌥⌘N and ⌥-typed characters don't flash the overlay.
+        if controlOnly(flags), isKeyWindow {
+            // Short delay so ⌃-key shortcuts (⌃A, ⌃E…) don't flash the overlay.
             let work = DispatchWorkItem { [weak self] in
-                guard let self, self.optionOnly(NSEvent.modifierFlags), self.isKeyWindow else { return }
+                guard let self, self.controlOnly(NSEvent.modifierFlags), self.isKeyWindow else { return }
                 self.setMoveMode(true)
             }
             pendingMoveMode = work
@@ -267,8 +267,8 @@ final class NotePanel: NSPanel {
         switch event.type {
         case .flagsChanged:
             updateMoveMode(event.modifierFlags)
-        case .leftMouseDown where inMoveMode || optionOnly(event.modifierFlags):
-            // Drag the window from anywhere while ⌥ is held.
+        case .leftMouseDown where inMoveMode || controlOnly(event.modifierFlags):
+            // Drag the window from anywhere while ⌃ is held (this also stops ⌃-click opening a menu).
             NSCursor.closedHand.push()
             performDrag(with: event)
             NSCursor.pop()
