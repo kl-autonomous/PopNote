@@ -1,30 +1,28 @@
 # PopNote
 
-A tiny floating note for macOS. Press a shortcut, jot something down, press it again and it's saved. No account, no sync service, no settings screen.
+A note that's one keystroke away. Jot an idea down without leaving what you're doing, then hand it to an AI later.
 
-## What it does
+**[Website →](https://kl-autonomous.github.io/PopNote/)**
 
-| Shortcut | Action |
+<img src="docs/note-light.png" width="420" alt="The PopNote window holding notes on a paper, a pasted chart, and a question to ask an AI.">
+
+## Keys
+
+| | |
 |---|---|
-| **⌥⌘N** | Open a new, empty note on top of everything, including full-screen apps and every Space |
-| **⌥⌘N** again, **Esc**, or the close button | Save the note and hide it |
-| **⌘↩** or the **Copy** button | Save the note, copy it to the clipboard, and hide it |
+| **⌥⌘N** | Open a new note over everything, full-screen apps included. Press again to save and close. |
+| **Esc** | Save and close. |
+| **⌘↩** | Save, copy to clipboard (with images), and close. |
+| Hold **⌃** and drag | Move the window from anywhere. |
+| Double-click title bar | Fit the window to the note. |
 
-Empty notes are not saved.
+Drag or paste images in. They show as small previews and are saved at full resolution.
 
-Each note is a plain Markdown file in `~/Documents/PopNote/`, named by date and first line, for example `2026-11-14 0825 – grocery list.md`. Any editor can open these files, and Spotlight can search them.
-
-### Images
-
-Drag an image into a note, or paste one with ⌘V. It shows inline as a small preview that fits the window (and re-fits when you resize it), so even a huge photo stays manageable. The full-resolution original is what gets saved and copied. When the note is saved, each image is written to `~/Documents/PopNote/attachments/` and the note gets a normal Markdown link (`![](attachments/20261114-083254-1.png)`), so editors like Obsidian or Typora show it. **Copy** puts both the pictures and the text on the clipboard, so pasting into Notes, Mail or Pages keeps the images. Pasting text never brings in fonts or colours.
-
-Double-click the title bar to fit the window to the note's content. Hold **⌃ Control** and drag anywhere in the note to move the window.
-
-PopNote lives in the menu bar (no Dock icon). From there you can open a new note, open the notes folder, turn on **Launch at Login**, choose **Appearance** (Follow System, Light or Dark), or quit.
+Notes are Markdown files in `~/Documents/PopNote/`, with images in `attachments/`.
 
 ## Install
 
-Requires macOS 13 or later and the Xcode Command Line Tools (`xcode-select --install`).
+macOS 13 or later, with the Xcode Command Line Tools (`xcode-select --install`).
 
 ```bash
 git clone https://github.com/kl-autonomous/PopNote.git
@@ -33,13 +31,7 @@ cd PopNote
 open /Applications/PopNote.app
 ```
 
-`build.sh` compiles the single source file, ad-hoc signs the app, and copies it to `/Applications`. The first time PopNote saves a note, macOS may ask whether it can access your Documents folder.
-
-The global shortcut uses the Carbon hotkey API, so PopNote doesn't need Accessibility permission. If another app already uses ⌥⌘N, PopNote tells you, and you can still open notes from its menu bar icon.
-
-## Changing the shortcut
-
-Edit `registerHotKey()` in `main.swift` (key code and modifiers) and the matching `New Note` menu item, then run `./build.sh` again.
+PopNote lives in the menu bar. Turn on **Launch at Login** there.
 
 ## License
 
